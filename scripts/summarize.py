@@ -16,7 +16,6 @@ except ImportError:
 # ==========================================
 # 👇 配置区域 (自动读取命令行参数和环境变量)
 # ==========================================
-
 def _load_dotenv(filepath):
     """从 .env 文件加载 KEY=VALUE 到环境变量（不覆盖已存在的）。"""
     if not os.path.isfile(filepath):
@@ -86,11 +85,20 @@ NOVEL_API_MODEL=gpt-4o
     # 自动推导输出路径
     novel_dir = os.path.dirname(config["NOVEL_PATH"])
     novel_name = os.path.splitext(os.path.basename(config["NOVEL_PATH"]))[0]
-    # 输出到上一级目录 (即 1-边界/)
+
+    # 默认行为：输出到小说目录的上一级，例如 1-边界/xxx.txt -> 项目根/1.1_xxx_故事梗概.md
     output_dir = os.path.dirname(novel_dir)
-    config["OUTPUT_FILE"] = os.path.join(output_dir, f"1.1_{novel_name}_故事梗概.md")
-    
+    output_file = os.path.join(output_dir, f"1.1_{novel_name}_故事梗概.md")
+
+    # 如果小说已经放在标准目录 1-边界/ 下，则固定输出为 1-边界/1.1_全书故事梗概.md
+    if os.path.basename(novel_dir) == "1-边界":
+        output_dir = novel_dir
+        output_file = os.path.join(output_dir, "1.1_全书故事梗概.md")
+
+    config["OUTPUT_FILE"] = output_file
+
     return config
+
 
 CONFIG = get_config()
 
@@ -116,6 +124,7 @@ CACHE_DIR = os.path.join(output_dir, "summary_cache")
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
+
 def extract_chapters(file_path):
     """读取并切分小说章节"""
     if not os.path.exists(file_path):
@@ -125,18 +134,14 @@ def extract_chapters(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
         text = f.read()
 
-    # -------------------------------------------------------
     # 🎯 智能章节识别逻辑
-    # -------------------------------------------------------
-    # 兼容格式示例：
-    # - 第1章 / 第一卷 / Chapter 1
-    # - 1. 标题 / 1 标题 (数字+点/空格)
-    # - 序章 / 尾声 / 番外 / 前言 / 后记
-    # -------------------------------------------------------
-    pattern = re.compile(r'(^\s*(?:第[ \d零一二三四五六七八九十百千万]+[章卷回节]|[\d]+[、\. ]|Chapter\s*[\d]+|序章|尾声|番外|前言|后记).*$)', re.MULTILINE)
-    
+    pattern = re.compile(
+        r'(^\s*(?:第[ \d零一二三四五六七八九十百千万]+[章卷回节]|[\d]+[、\. ]|Chapter\s*[\d]+|序章|尾声|番外|前言|后记).*$)',
+        re.MULTILINE
+    )
+
     matches = list(pattern.finditer(text))
-    
+
     if not matches:
         print("⚠️ 警告：未能识别到任何章节标题！")
         print("可能原因：小说格式特殊，或者正则不匹配。")
@@ -147,73 +152,72 @@ def extract_chapters(file_path):
     for i, match in enumerate(matches):
         title = match.group(1).strip()
         start = match.start()
-        end = matches[i+1].start() if i+1 < len(matches) else len(text)
-        
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+
         # 提取内容（去除标题本身）
         content = text[start:end].replace(title, "", 1).strip()
-        
-        chapters.append({"index": i+1, "title": title, "content": content})
-        
+
+        chapters.append({"index": i + 1, "title": title, "content": content})
+
     print(f"✅ 成功识别 {len(chapters)} 个章节")
-    
-    # 打印前几个章节供检查
     print("👀 识别示例 (前5章):")
     for c in chapters[:5]:
         print(f"   - [{c['index']}] {c['title']}")
     print("   ...")
-    
+
     return chapters
+
 
 def is_traditional_chinese(text):
     """简单的繁体字检测 (启发式)"""
-    # 常用繁体字样本
     traditional_chars = set("為麼這門見過對來應說後個國時種開車貝長樂風龍")
     count = sum(1 for char in text if char in traditional_chars)
-    # 如果繁体字占比超过 1% (且总字数>100)，则认为是繁体
+    # 如果繁体字占比超过 0.5% (且总字数>100)，则认为是繁体
     return count > 0 and (count / len(text) > 0.005)
+
 
 def review_and_fix_batches(batches, results, output_lang):
     """审查并修复有问题的批次"""
     bad_batches = []
-    
+
     print("\n🔍 开始质量审查 (Review)...")
-    
+
     for batch in batches:
         batch_id = batch["id"]
         if batch_id not in results:
-            continue # 已经失败的不用管，主循环会处理
-            
+            continue  # 已经失败的不用管，主循环会处理
+
         content = results[batch_id]
         expected_count = len(batch["chapters"])
-        
+
         # 1. 检查章节数量 (简单数 "##" 标题数量)
-        # 宽松匹配，允许误差
         chapter_headers = content.count("## ")
         if chapter_headers < expected_count:
             print(f"❌ 批次 {batch_id} 完整性存疑: 预期 {expected_count} 章，实际识别到 {chapter_headers} 章。")
             bad_batches.append(batch)
             continue
-            
+
         # 2. 检查语言 (仅当目标是简体中文时)
         if output_lang == "简体中文" and is_traditional_chinese(content):
-             print(f"❌ 批次 {batch_id} 语言检测异常: 发现大量繁体字。")
-             bad_batches.append(batch)
-             continue
-             
+            print(f"❌ 批次 {batch_id} 语言检测异常: 发现大量繁体字。")
+            bad_batches.append(batch)
+            continue
+
     return bad_batches
+
 
 def generate_summary(batch_chapters, batch_id, is_retry=False):
     """调用 API 生成总结"""
-    
+
     # 构建 Prompt
     titles = [c['title'] for c in batch_chapters]
     content_text = "\n\n".join([c['content'] for c in batch_chapters])
-    
+
     # 如果是重试 (Review 不通过)，加强语气
     system_instruction = f"你是一个高效的小说摘要助手。请直接输出 Markdown 格式的章节梗概。注意：输出语言必须是 {CONFIG['OUTPUT_LANGUAGE']}。"
     if is_retry:
         system_instruction += " ⚠️ 上次生成的内容因语言或完整性问题未通过审查，请务必严格按照要求输出，特别是【繁简转换】和【章节完整性】。"
-    
+
     prompt = f"""
 你是一个专业的小说剧情分析师。请阅读以下 {len(batch_chapters)} 个章节的小说内容，并输出每个章节的【故事梗概】。
 
@@ -253,7 +257,7 @@ def generate_summary(batch_chapters, batch_id, is_retry=False):
         except Exception as e:
             print(f"⚠️ 批次 {batch_id} (尝试 {attempt+1}/{CONFIG['RETRY_TIMES']}) 失败: {str(e)}")
             time.sleep(2 * (attempt + 1))
-    
+
     return None
 
 
@@ -353,21 +357,23 @@ def main():
     print("🚀 开始执行全自动并行总结脚本...")
     print(f"📖 目标小说: {os.path.basename(CONFIG['NOVEL_PATH'])}")
     print(f"🧵 并行数量: {CONFIG['MAX_WORKERS']}")
-    
+
     # 1. 读取章节
     all_chapters = extract_chapters(CONFIG["NOVEL_PATH"])
-    if not all_chapters: return
+    if not all_chapters:
+        return
 
     # 2. 过滤需要处理的章节
     start_idx = CONFIG["START_CHAPTER"] - 1
-    if start_idx < 0: start_idx = 0
+    if start_idx < 0:
+        start_idx = 0
     target_chapters = all_chapters[start_idx:]
-    
+
     # 限制总章节数
     limit = CONFIG["TOTAL_CHAPTERS_LIMIT"]
     if limit > 0:
         target_chapters = target_chapters[:limit]
-    
+
     if not target_chapters:
         print("⚠️ 没有需要处理的章节。")
         return
@@ -378,7 +384,7 @@ def main():
     batch_size = CONFIG["CHAPTERS_PER_BATCH"]
     batches = []
     for i in range(0, len(target_chapters), batch_size):
-        batch = target_chapters[i : i + batch_size]
+        batch = target_chapters[i: i + batch_size]
         batch_id = f"batch_{batch[0]['index']:04d}_{batch[-1]['index']:04d}"
         batches.append({"id": batch_id, "chapters": batch})
 
@@ -394,33 +400,32 @@ def main():
         print("\n\n⚠️ 检测到中断信号 (Ctrl+C)！")
         print("🛑 正在强制停止所有任务...")
         stop_event.set()
-        # 强制退出，不再等待子线程
         os._exit(0)
-        
+
     signal.signal(signal.SIGINT, signal_handler)
-    
+
     # 先加载已有的缓存
     for batch in batches:
         cache_path = os.path.join(CACHE_DIR, batch["id"] + ".md")
         if os.path.exists(cache_path):
             with open(cache_path, 'r', encoding='utf-8') as f:
                 results[batch["id"]] = f.read()
-    
+
     pending_batches = [b for b in batches if b["id"] not in results]
     print(f"🔄 已跳过 {len(batches) - len(pending_batches)} 个已完成批次，剩余 {len(pending_batches)} 个待处理...")
 
     if not pending_batches:
         print("✅ 所有批次均已完成 (缓存命中)。")
     else:
-        # 使用 tqdm 进度条 (如果有)
         pbar = tqdm(total=len(pending_batches), desc="AI 总结进度", unit="批") if tqdm else None
-        
+
         with ThreadPoolExecutor(max_workers=CONFIG["MAX_WORKERS"]) as executor:
             futures = {}
-            
+
             # 提交所有任务
             for batch in pending_batches:
-                if stop_event.is_set(): break
+                if stop_event.is_set():
+                    break
                 f = executor.submit(generate_summary, batch["chapters"], batch["id"])
                 futures[f] = batch
 
@@ -430,29 +435,31 @@ def main():
                 try:
                     summary = future.result()
                     if summary:
-                        # 写入缓存
                         cache_path = os.path.join(CACHE_DIR, batch["id"] + ".md")
                         with open(cache_path, 'w', encoding='utf-8') as f:
                             f.write(summary)
-                        
+
                         with lock:
                             results[batch["id"]] = summary
-                            
-                        if pbar: pbar.update(1)
-                        else: print(f"✅ 完成批次 {batch['id']}")
+
+                        if pbar:
+                            pbar.update(1)
+                        else:
+                            print(f"✅ 完成批次 {batch['id']}")
                     else:
                         print(f"\n❌ 批次 {batch['id']} 失败")
                 except Exception as exc:
                     print(f"\n❌ 批次 {batch['id']} 异常: {exc}")
-                
+
                 if stop_event.is_set():
                     break
-                    
-        if pbar: pbar.close()
+
+        if pbar:
+            pbar.close()
 
     if stop_event.is_set():
         print("\n⚠️ 脚本已因用户中断而停止。")
-        print(f"💾 已保存当前进度。下次运行脚本时，会自动从断点处继续。")
+        print("💾 已保存当前进度。下次运行脚本时，会自动从断点处继续。")
         sys.exit(0)
 
     # 5. 质量审查 (Review) & 自动修复：分批审查两轮 + 单章审查一轮
@@ -486,16 +493,17 @@ def main():
     # 6. 合并结果
     print("\n💾 正在合并所有梗概...")
     final_content = f"# 《{os.path.basename(CONFIG['NOVEL_PATH'])}》 全书故事梗概\n\n> 本文档由 AI 自动并行生成\n\n"
-    
+
     # 按顺序合并
     for batch in batches:
         if batch["id"] in results:
             final_content += results[batch["id"]] + "\n\n"
-    
+
     with open(CONFIG["OUTPUT_FILE"], 'w', encoding='utf-8') as f:
         f.write(final_content)
-        
-    print(f"🎉 全部完成！结果已保存至:\n{CONFIG['OUTPUT_FILE']}")
+
+    print("🎉 全部完成！结果已保存至:")
+    print(CONFIG["OUTPUT_FILE"])
 
 
 if __name__ == "__main__":
